@@ -1,0 +1,30 @@
+strategy:
+  scan_interval_seconds: 300
+  max_tracked_wallets: 10
+
+filters:
+  min_position_size_usd: 10
+  min_conviction_score: 0.3
+  max_price_drift: 0.03
+  min_time_to_expiry_minutes: 30
+  allow_conflict: false
+  skip_existing_position: true
+
+position:
+  copy_ratio: 0.02
+  max_single_position_usd: 3
+  max_total_exposure_usd: 8
+
+exit:
+  take_profit_percent: 0.8
+  stop_loss_percent: -0.2
+  max_hold_hours: 48
+  follow_smart_wallet_exit: true
+
+risk:
+  max_order_retries: 3
+  slippage_protection_percent: 0.05
+
+wallets:
+  - "0x123..."
+  - "0xabc..."
