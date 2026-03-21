@@ -22,6 +22,7 @@ class Wallet:
         private_key_gpg: str | None = ".env.gpg",
     ) -> None:
         private_key = self._load_private_key(private_key_env=private_key_env, private_key_gpg=private_key_gpg)
+        self._private_key = private_key
         self._account = Account.from_key(private_key)
         self.context = WalletContext(address=self._account.address, signature_type=signature_type)
 
@@ -50,3 +51,7 @@ class Wallet:
         msg = encode_defunct(text=payload)
         signed = self._account.sign_message(msg)
         return signed.signature.hex()
+
+    @property
+    def private_key(self) -> str:
+        return self._private_key

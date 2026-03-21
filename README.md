@@ -69,3 +69,10 @@ python3 main.py \
   --rpc-url https://polygon-rpc.com \
   --dry-run
 ```
+
+## 代理钱包（MetaMask 登录）关键说明
+
+- MetaMask/EOA 私钥仅用于签名。
+- Polymarket 资金账户使用平台生成的 **proxy/funder 地址**，余额与持仓都应查询该地址。
+- 程序已按此模式初始化 CLOB 客户端：`signature_type=2` + `funder=PROXY_WALLET`，并在启动时通过私钥 `create_or_derive_api_creds()` 派生 API key。
+

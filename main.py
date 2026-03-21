@@ -49,7 +49,13 @@ async def keepalive(logger: logging.Logger) -> None:
 
 async def run_bot(cfg: dict[str, Any], args: argparse.Namespace, logger: logging.Logger) -> None:
     wallet = Wallet(private_key_env=args.private_key, signature_type=2, private_key_gpg=args.private_key_gpg)
-    client = PolymarketClient(rpc_url=args.rpc_url, timeout_seconds=15)
+    client = PolymarketClient(
+        rpc_url=args.rpc_url,
+        timeout_seconds=15,
+        private_key=wallet.private_key,
+        proxy_wallet=args.proxy_wallet,
+        signature_type=2,
+    )
     storage = Storage("open-positions.json", "tracked-markets.json")
     risk = RiskManager(cfg=cfg, storage=storage)
     strategy = Strategy(cfg=cfg)

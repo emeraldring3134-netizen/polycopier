@@ -40,7 +40,8 @@ class Executor:
         trades = await self.client.get_trades(self.wallet.address)
         book: dict[tuple[str, str], dict[str, Any]] = {}
         for t in trades:
-            market_id = str(t.get("market_id") or t.get("market") or "")
+            token_id = str(t.get("token_id") or t.get("asset_id") or t.get("tokenId") or "")
+            market_id = str(t.get("market_id") or t.get("market") or token_id)
             side = str(t.get("side") or "").upper()
             shares = float(t.get("size") or t.get("shares") or 0)
             price = float(t.get("price") or 0)
@@ -49,7 +50,15 @@ class Executor:
             key = (market_id, side)
             node = book.setdefault(
                 key,
-                {"market_id": market_id, "side": side, "shares": 0.0, "cost": 0.0, "timestamp": now_ts(), "max_pnl_percent": 0.0},
+                {
+                    "market_id": market_id,
+                    "token_id": token_id,
+                    "side": side,
+                    "shares": 0.0,
+                    "cost": 0.0,
+                    "timestamp": now_ts(),
+                    "max_pnl_percent": 0.0,
+                },
             )
             node["shares"] += shares
             node["cost"] += shares * price
@@ -61,6 +70,7 @@ class Executor:
             positions.append(
                 {
                     "market_id": item["market_id"],
+                    "token_id": item.get("token_id"),
                     "side": item["side"],
                     "entry_price": avg_price,
                     "amount": item["cost"],
@@ -187,19 +197,24 @@ class Executor:
         changed_positions: list[dict[str, Any]] = []
         for p in positions:
             market_id = p["market_id"]
+            token_id = str(p.get("token_id") or "")
             side = p["side"]
             entry_price = float(p["entry_price"])
             amount = float(p["amount"])
             shares = float(p.get("shares") or (amount / entry_price if entry_price > 0 else 0))
             opened_at = int(p["timestamp"])
 
-            market_map = await self.client.get_market_data_batch([market_id])
-            market = market_map.get(market_id)
-            if not market:
-                changed_positions.append(p)
-                continue
+            current = 0.0
+            if token_id:
+                current = await self.client.get_last_trade_price(token_id)
+            if current <= 0:
+                market_map = await self.client.get_market_data_batch([market_id])
+                market = market_map.get(market_id)
+                if not market:
+                    changed_positions.append(p)
+                    continue
+                current = market.current_price
 
-            current = market.current_price
             pnl_percent = ((current - entry_price) / entry_price) if entry_price > 0 else 0
             if side == "NO":
                 pnl_percent = -pnl_percent
@@ -210,7 +225,7 @@ class Executor:
 
             if abs(pnl_percent) >= exit_cfg.get("alert_move_percent", 0.15):
                 msg = (
-                    f"⚠️ 预警：{market_names.get(market_id, market.market_name)} {side} {shares:.2f}股 "
+                    f"⚠️ 预警：{market_names.get(market_id, market_id)} {side} {shares:.2f}股 "
                     f"{entry_price:.4f} → {current:.4f} ({pnl_percent * 100:.2f}%)"
                 )
                 await self.notifier.send_text(msg)
@@ -229,7 +244,7 @@ class Executor:
                 changed_positions.append(p)
                 continue
 
-            payload = f"close:{market_id}:{side}:{amount}:{market.current_price}:{now_ts()}"
+            payload = f"close:{market_id}:{side}:{amount}:{current}:{now_ts()}"
             signature = self.wallet.sign_message(payload)
             result = await self.client.close_position(
                 wallet_address=self.wallet.address,
@@ -237,7 +252,7 @@ class Executor:
                 market_id=market_id,
                 side=side,
                 amount_usd=amount,
-                price=market.current_price,
+                price=current,
                 proxy_wallet=self.proxy_wallet,
                 dry_run=self.dry_run,
             )

@@ -6,6 +6,15 @@ from typing import Any
 
 import aiohttp
 
+try:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import BalanceAllowanceParams, OpenOrderParams, TradeParams
+except Exception:  # pragma: no cover
+    ClobClient = None
+    BalanceAllowanceParams = None
+    OpenOrderParams = None
+    TradeParams = None
+
 
 @dataclass
 class SmartWalletPosition:
@@ -32,12 +41,33 @@ class MarketData:
 
 
 class PolymarketClient:
-    def __init__(self, rpc_url: str, timeout_seconds: int = 20) -> None:
+    def __init__(
+        self,
+        rpc_url: str,
+        timeout_seconds: int = 20,
+        private_key: str | None = None,
+        proxy_wallet: str | None = None,
+        signature_type: int = 2,
+    ) -> None:
         self.rpc_url = rpc_url
         self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self.clob_url = "https://clob.polymarket.com"
         self.data_url = "https://gamma-api.polymarket.com"
         self.stats_url = "https://data-api.polymarket.com"
+        self.proxy_wallet = proxy_wallet
+        self.signature_type = signature_type
+        self._clob: ClobClient | None = None
+
+        if ClobClient and private_key and proxy_wallet:
+            self._clob = ClobClient(
+                self.clob_url,
+                chain_id=137,
+                key=private_key,
+                signature_type=signature_type,
+                funder=proxy_wallet,
+            )
+            creds = self._clob.create_or_derive_api_creds()
+            self._clob.set_api_creds(creds)
 
     async def _get_json(self, session: aiohttp.ClientSession, url: str, params: dict[str, Any] | None = None) -> Any:
         for _ in range(3):
@@ -86,6 +116,8 @@ class PolymarketClient:
         return positions
 
     async def get_wallet_win_rate_60d(self, wallet: str) -> float:
+        import time
+
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             payload = await self._get_json(session, f"{self.stats_url}/positions", params={"user": wallet})
         rows = payload if isinstance(payload, list) else payload.get("data", []) if payload else []
@@ -95,7 +127,6 @@ class PolymarketClient:
             closed_ts = int(row.get("closedAt") or row.get("closed_at") or 0)
             if not closed_ts:
                 continue
-            import time
             if closed_ts < (int(time.time()) - 60 * 24 * 3600):
                 continue
             pnl = float(row.get("realizedPnl") or row.get("pnl") or 0)
@@ -129,30 +160,58 @@ class PolymarketClient:
         return out
 
     async def get_balance_allowance(self, wallet_address: str) -> float:
+        funder = self.proxy_wallet or wallet_address
+        if self._clob and BalanceAllowanceParams:
+            def _call() -> Any:
+                params = BalanceAllowanceParams(asset_type="COLLATERAL", signature_type=self.signature_type, funder=funder)
+                return self._clob.get_balance_allowance(params)
+
+            data = await asyncio.to_thread(_call)
+            raw = float((data or {}).get("balance") or 0)
+            return raw / 1e6
+
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             data = await self._get_json(
                 session,
                 f"{self.clob_url}/balance-allowance",
-                params={"address": wallet_address, "asset_type": "COLLATERAL"},
+                params={"address": funder, "asset_type": "COLLATERAL", "signature_type": self.signature_type},
             )
         raw = float((data or {}).get("balance") or 0)
         return raw / 1e6
 
     async def get_orders(self, wallet_address: str) -> list[dict[str, Any]]:
+        if self._clob and OpenOrderParams:
+            data = await asyncio.to_thread(self._clob.get_orders, OpenOrderParams())
+            return data if isinstance(data, list) else []
+        funder = self.proxy_wallet or wallet_address
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
-            data = await self._get_json(session, f"{self.clob_url}/orders", params={"address": wallet_address})
+            data = await self._get_json(session, f"{self.clob_url}/orders", params={"address": funder})
         return data if isinstance(data, list) else data.get("data", []) if data else []
 
     async def cancel_order(self, order_id: str) -> dict[str, Any]:
+        if self._clob:
+            return await asyncio.to_thread(self._clob.cancel, order_id)
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             async with session.delete(f"{self.clob_url}/orders/{order_id}") as resp:
                 payload = await resp.json()
                 return payload
 
     async def get_trades(self, wallet_address: str) -> list[dict[str, Any]]:
+        if self._clob and TradeParams:
+            data = await asyncio.to_thread(self._clob.get_trades, TradeParams())
+            return data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
+        funder = self.proxy_wallet or wallet_address
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
-            data = await self._get_json(session, f"{self.clob_url}/trades", params={"address": wallet_address})
+            data = await self._get_json(session, f"{self.clob_url}/trades", params={"address": funder})
         return data if isinstance(data, list) else data.get("data", []) if data else []
+
+    async def get_last_trade_price(self, token_id: str) -> float:
+        if self._clob:
+            data = await asyncio.to_thread(self._clob.get_last_trade_price, token_id)
+            return float((data or {}).get("price") or 0)
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            data = await self._get_json(session, f"{self.clob_url}/last-trade-price", params={"token_id": token_id})
+        return float((data or {}).get("price") or 0)
 
     async def place_order(
         self,
@@ -179,8 +238,8 @@ class PolymarketClient:
             "price": price,
             "wallet": wallet_address,
             "signature": signature,
-            "signature_type": 2,
-            "proxy_wallet": proxy_wallet,
+            "signature_type": self.signature_type,
+            "proxy_wallet": proxy_wallet or self.proxy_wallet,
         }
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             for _ in range(3):
