@@ -25,6 +25,7 @@ class SmartWalletPosition:
 @dataclass
 class MarketData:
     market_id: str
+    market_name: str
     current_price: float
     liquidity: float
     expiry_ts: int
@@ -36,6 +37,7 @@ class PolymarketClient:
         self.timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self.clob_url = "https://clob.polymarket.com"
         self.data_url = "https://gamma-api.polymarket.com"
+        self.stats_url = "https://data-api.polymarket.com"
 
     async def _get_json(self, session: aiohttp.ClientSession, url: str, params: dict[str, Any] | None = None) -> Any:
         for _ in range(3):
@@ -50,7 +52,6 @@ class PolymarketClient:
         return None
 
     async def get_wallet_positions(self, wallet: str) -> list[SmartWalletPosition]:
-        # Public endpoints have multiple variants; fallback-safe parsing is used.
         url = f"{self.data_url}/positions"
         params = {"user": wallet, "limit": 100}
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
@@ -84,6 +85,25 @@ class PolymarketClient:
                 continue
         return positions
 
+    async def get_wallet_win_rate_60d(self, wallet: str) -> float:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            payload = await self._get_json(session, f"{self.stats_url}/positions", params={"user": wallet})
+        rows = payload if isinstance(payload, list) else payload.get("data", []) if payload else []
+        wins = 0
+        total = 0
+        for row in rows:
+            closed_ts = int(row.get("closedAt") or row.get("closed_at") or 0)
+            if not closed_ts:
+                continue
+            import time
+            if closed_ts < (int(time.time()) - 60 * 24 * 3600):
+                continue
+            pnl = float(row.get("realizedPnl") or row.get("pnl") or 0)
+            total += 1
+            if pnl > 0:
+                wins += 1
+        return wins / total if total else 0.0
+
     async def get_market_data_batch(self, market_ids: list[str]) -> dict[str, MarketData]:
         if not market_ids:
             return {}
@@ -99,6 +119,7 @@ class PolymarketClient:
             try:
                 out[market_id] = MarketData(
                     market_id=market_id,
+                    market_name=str(data.get("question") or data.get("title") or market_id),
                     current_price=float(data.get("lastTradePrice") or data.get("price") or 0),
                     liquidity=float(data.get("liquidity") or 0),
                     expiry_ts=int(data.get("endDateUnix") or data.get("endTimestamp") or 0),
@@ -106,6 +127,32 @@ class PolymarketClient:
             except (TypeError, ValueError):
                 continue
         return out
+
+    async def get_balance_allowance(self, wallet_address: str) -> float:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            data = await self._get_json(
+                session,
+                f"{self.clob_url}/balance-allowance",
+                params={"address": wallet_address, "asset_type": "COLLATERAL"},
+            )
+        raw = float((data or {}).get("balance") or 0)
+        return raw / 1e6
+
+    async def get_orders(self, wallet_address: str) -> list[dict[str, Any]]:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            data = await self._get_json(session, f"{self.clob_url}/orders", params={"address": wallet_address})
+        return data if isinstance(data, list) else data.get("data", []) if data else []
+
+    async def cancel_order(self, order_id: str) -> dict[str, Any]:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            async with session.delete(f"{self.clob_url}/orders/{order_id}") as resp:
+                payload = await resp.json()
+                return payload
+
+    async def get_trades(self, wallet_address: str) -> list[dict[str, Any]]:
+        async with aiohttp.ClientSession(timeout=self.timeout) as session:
+            data = await self._get_json(session, f"{self.clob_url}/trades", params={"address": wallet_address})
+        return data if isinstance(data, list) else data.get("data", []) if data else []
 
     async def place_order(
         self,
@@ -115,6 +162,7 @@ class PolymarketClient:
         side: str,
         amount_usd: float,
         price: float,
+        proxy_wallet: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         if dry_run:
@@ -131,6 +179,8 @@ class PolymarketClient:
             "price": price,
             "wallet": wallet_address,
             "signature": signature,
+            "signature_type": 2,
+            "proxy_wallet": proxy_wallet,
         }
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             for _ in range(3):
@@ -151,6 +201,7 @@ class PolymarketClient:
         side: str,
         amount_usd: float,
         price: float,
+        proxy_wallet: str | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         opposite = "NO" if side == "YES" else "YES"
@@ -161,5 +212,6 @@ class PolymarketClient:
             side=opposite,
             amount_usd=amount_usd,
             price=price,
+            proxy_wallet=proxy_wallet,
             dry_run=dry_run,
         )

@@ -23,6 +23,9 @@ class RiskManager:
     def is_duplicate_signal(self, wallet: str, market_id: str, side: str) -> bool:
         return self.storage.is_copied(wallet=wallet, market_id=market_id, side=side)
 
+    def is_tracked_market(self, market_id: str, side: str) -> bool:
+        return self.storage.is_market_tracked(market_id, side)
+
     def slippage_ok(self, expected: float, actual: float) -> bool:
         if expected <= 0:
             return False

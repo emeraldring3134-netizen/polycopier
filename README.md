@@ -1,30 +1,42 @@
 # polymarket-copy-bot
 
-Polymarket 智能钱包跟单机器人（优化版）示例实现。
+Polymarket 智能钱包跟单机器人（修复增强版，Linux/OpenCloudOS9）。
 
-## 1. 目录结构
+## 已修复关键问题
+
+- 余额精度统一为 **USDC 6 位小数**（`/1e6`），避免余额放大 100 倍。
+- 增加全局异常处理与 `KEEPALIVE` 日志（每 60 秒）防止看门狗误杀。
+- `tracked-markets.json` 持久化去重，重启后仍能防重复下单。
+- 每轮扫描前从 CLOB `trades` 重建 `open-positions.json`，减少本地状态漂移。
+- 持仓按最新价格实时计算浮盈亏，并写回 `open-positions.json`。
+
+## 新增增强能力
+
+- 飞书价格预警（±15% 可配置）。
+- 追踪止盈（最高盈利>=30% 且回撤10%触发）+ 固定止损（-20%）。
+- 订单状态跟踪、30分钟超时取消+重试一次。
+- 钱包 60 天胜率过滤（<55% 不跟）。
+- 多策略模式（激进/标准/保守）随总暴露动态切换。
+- 日志文件按天切割：`logs/live-YYYY-MM-DD.log`、`logs/error-YYYY-MM-DD.log`。
+
+## 目录
 
 ```text
-polymarket-copy-bot/
-├── main.py
-├── config.yaml
-├── wallet.py
-├── polymarket_client.py
-├── strategy.py
-├── risk_manager.py
-├── executor.py
-├── tracker.py
-├── storage.py
-├── logger.py
-└── utils.py
+main.py
+config.yaml
+wallet.py
+polymarket_client.py
+strategy.py
+risk_manager.py
+executor.py
+tracker.py
+storage.py
+logger.py
+notifier.py
+utils.py
 ```
 
-## 2. 环境要求
-
-- Linux（OpenCloudOS 9 可运行）
-- Python 3.10+
-
-## 3. 安装依赖
+## 安装
 
 ```bash
 python3 -m venv .venv
@@ -32,39 +44,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 4. 私钥配置（仅 ENV）
+## 私钥安全
+
+推荐：将私钥放入 `.env.gpg`（仅内存解密，不写磁盘）
 
 ```bash
-export PRIVATE_KEY=0xYOUR_PRIVATE_KEY
+gpg --encrypt --recipient <YOUR_KEY_ID> .env
 ```
 
-> 程序不会将私钥写入磁盘。
+`.env.gpg` 内容可为：
 
-## 5. 启动
+```text
+PRIVATE_KEY=0x...
+```
+
+## 启动
 
 ```bash
 python3 main.py \
   --config config.yaml \
   --private-key PRIVATE_KEY \
+  --private-key-gpg .env.gpg \
+  --proxy-wallet 0xYourProxy \
   --rpc-url https://polygon-rpc.com \
   --dry-run
 ```
-
-参数：
-
-- `--config` 配置文件路径
-- `--private-key` 私钥所在环境变量名（如 `PRIVATE_KEY`）
-- `--proxy-wallet` 代理钱包（可选）
-- `--rpc-url` Polygon RPC 地址
-- `--dry-run` 模拟交易模式
-
-## 6. 产物
-
-- `logs/bot.log`：扫描与交易日志
-- `logs/error.log`：错误日志
-- `positions.json`：本地持仓与已跟单信号缓存
-
-## 7. 注意
-
-- 接口字段在 Polymarket 版本变化时可能调整，`polymarket_client.py` 使用了兼容性解析与重试。
-- 实盘前请务必先用 `--dry-run` 和小额度测试。

@@ -31,6 +31,14 @@ class Strategy:
         add_ratio = clamp(p.add_position_count, 0, 3) / 3.0
         return 0.5 * position_ratio + 0.2 * hold_ratio + 0.3 * add_ratio
 
+    def _mode(self, exposure: float) -> tuple[float, int, int | None]:
+        # (conviction threshold, top_wallets, max_new_orders)
+        if exposure < 2:
+            return 0.2, 10, None
+        if exposure <= 5:
+            return 0.3, 5, None
+        return 0.5, 3, 1
+
     def build_signals(
         self,
         positions: list[SmartWalletPosition],
@@ -39,16 +47,21 @@ class Strategy:
     ) -> list[CopySignal]:
         filters = self.cfg["filters"]
         pos_cfg = self.cfg["position"]
+        dynamic_threshold, top_wallets, max_new_orders = self._mode(current_total_exposure)
+        min_score = max(filters["min_conviction_score"], dynamic_threshold)
         out: list[CopySignal] = []
 
+        top_wallet_set = {p.wallet for p in sorted(positions, key=lambda x: x.wallet_total_usd, reverse=True)[:top_wallets]}
         for p in positions:
+            if p.wallet not in top_wallet_set:
+                continue
             m = market_map.get(p.market_id)
             if not m:
                 continue
             if p.position_size_usd < filters["min_position_size_usd"]:
                 continue
             score = self.conviction_score(p)
-            if score < filters["min_conviction_score"]:
+            if score < min_score:
                 continue
             if m.current_price <= 0 or p.entry_price <= 0:
                 continue
@@ -78,6 +91,8 @@ class Strategy:
                     smart_position=p,
                 )
             )
+            if max_new_orders is not None and len(out) >= max_new_orders:
+                break
         return out
 
     @staticmethod
