@@ -12,6 +12,7 @@ from logger import setup_logger
 from notifier import FeishuNotifier
 from polymarket_client import PolymarketClient
 from risk_manager import RiskManager
+from secret_store import init_secret_file, load_secret_file
 from storage import Storage
 from strategy import Strategy
 from tracker import SmartWalletTracker
@@ -28,10 +29,9 @@ class IterationAdapter(logging.LoggerAdapter):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Polymarket Smart Wallet Copy Bot")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
-    parser.add_argument("--private-key", default="PRIVATE_KEY", help="Environment variable key that stores private key")
-    parser.add_argument("--private-key-gpg", default=".env.gpg", help="Encrypted private key file path")
+    parser.add_argument("--secrets-file", default="secrets.enc.json", help="Encrypted secrets file")
+    parser.add_argument("--init-secrets", action="store_true", help="Interactive setup for private key + funder and encrypt")
     parser.add_argument("--rpc-url", default="https://polygon-rpc.com", help="Polygon RPC URL")
-    parser.add_argument("--proxy-wallet", default=None, help="Optional proxy wallet address")
     parser.add_argument("--dry-run", action="store_true", help="Simulate orders without placing real trades")
     return parser.parse_args()
 
@@ -48,12 +48,13 @@ async def keepalive(logger: logging.Logger) -> None:
 
 
 async def run_bot(cfg: dict[str, Any], args: argparse.Namespace, logger: logging.Logger) -> None:
-    wallet = Wallet(private_key_env=args.private_key, signature_type=2, private_key_gpg=args.private_key_gpg)
+    secret_bundle = load_secret_file(args.secrets_file)
+    wallet = Wallet(private_key=secret_bundle.private_key, signature_type=2)
     client = PolymarketClient(
         rpc_url=args.rpc_url,
         timeout_seconds=15,
         private_key=wallet.private_key,
-        proxy_wallet=args.proxy_wallet,
+        proxy_wallet=secret_bundle.funder,
         signature_type=2,
     )
     storage = Storage("open-positions.json", "tracked-markets.json")
@@ -73,11 +74,11 @@ async def run_bot(cfg: dict[str, Any], args: argparse.Namespace, logger: logging
         cfg=cfg,
         logger=logger,
         dry_run=args.dry_run,
-        proxy_wallet=args.proxy_wallet,
+        proxy_wallet=secret_bundle.funder,
         notifier=notifier,
     )
 
-    logger.info("bot started wallet=%s proxy=%s dry_run=%s", wallet.address, args.proxy_wallet, args.dry_run, extra={"iteration": 0})
+    logger.info("bot started wallet=%s funder=%s dry_run=%s", wallet.address, secret_bundle.funder, args.dry_run, extra={"iteration": 0})
     interval = int(cfg["strategy"]["scan_interval_seconds"])
     asyncio.create_task(keepalive(logger))
     iteration = 0
@@ -118,6 +119,11 @@ async def run_bot(cfg: dict[str, Any], args: argparse.Namespace, logger: logging
 
 def main() -> None:
     args = parse_args()
+    if args.init_secrets:
+        init_secret_file(args.secrets_file)
+        print(f"secrets initialized: {args.secrets_file}")
+        return
+
     logger = setup_logger()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

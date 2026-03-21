@@ -1,10 +1,10 @@
 strategy:
   scan_interval_seconds: 600
-  max_tracked_wallets: 10
+  max_tracked_wallets: 20
+  top_n_wallet_positions: 8
 
 filters:
   min_position_size_usd: 10
-  min_conviction_score: 0.3
   max_price_drift: 0.03
   min_time_to_expiry_minutes: 30
   allow_conflict: false
