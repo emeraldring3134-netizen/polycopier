@@ -29,6 +29,7 @@ class SmartWalletPosition:
     opened_at_ts: int
     add_position_count: int
     smart_wallet_closed: bool = False
+    wallet_win_rate_60d: float = 0.0
 
 
 @dataclass
@@ -109,6 +110,7 @@ class PolymarketClient:
                         opened_at_ts=int(row.get("openedAt") or row.get("createdAt") or row.get("timestamp") or 0),
                         add_position_count=int(row.get("addCount") or row.get("fills") or 1),
                         smart_wallet_closed=bool(row.get("closed") or False),
+                        wallet_win_rate_60d=float(row.get("wallet_win_rate_60d") or 0.0),
                     )
                 )
             except (ValueError, TypeError):
@@ -212,6 +214,33 @@ class PolymarketClient:
         async with aiohttp.ClientSession(timeout=self.timeout) as session:
             data = await self._get_json(session, f"{self.clob_url}/last-trade-price", params={"token_id": token_id})
         return float((data or {}).get("price") or 0)
+
+    async def get_funder_open_positions(self, wallet_address: str) -> list[dict[str, Any]]:
+        """从 funder 的 trades 聚合出当前净持仓(同市场同方向)。"""
+        trades = await self.get_trades(wallet_address)
+        book: dict[tuple[str, str], dict[str, Any]] = {}
+        for t in trades:
+            market_id = str(t.get("market_id") or t.get("market") or t.get("token_id") or "")
+            side = str(t.get("side") or "").upper()
+            shares = float(t.get("size") or t.get("shares") or 0)
+            price = float(t.get("price") or 0)
+            if not market_id or side not in {"YES", "NO"} or shares <= 0:
+                continue
+            key = (market_id, side)
+            node = book.setdefault(key, {"market_id": market_id, "side": side, "shares": 0.0, "cost": 0.0})
+            node["shares"] += shares
+            node["cost"] += shares * price
+        out = []
+        for v in book.values():
+            if v["shares"] <= 0:
+                continue
+            out.append({
+                "market_id": v["market_id"],
+                "side": v["side"],
+                "shares": v["shares"],
+                "entry_price": v["cost"] / v["shares"],
+            })
+        return out
 
     async def place_order(
         self,

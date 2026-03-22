@@ -1,64 +1,27 @@
 # polymarket-copy-bot
 
-Polymarket 智能钱包跟单机器人（代理钱包 funder + MetaMask 签名模式）。
+Polymarket 智能钱包跟单机器人（MetaMask 签名 + funder 代理钱包模式）。
 
----
+## 核心机制
 
-## 1. 程序原理（先看这个）
+- 使用 MetaMask 私钥签名（`signature_type=2`）。
+- 使用 Polymarket 后台生成的代理钱包 `funder` 作为真实余额与持仓账户。
+- 每轮先同步 funder 实际持仓，再做选股与跟单，避免重复下单。
 
-### 1.1 账户模型
+## 本次重点优化
 
-本程序严格按 Polymarket 常见实盘模式实现：
+1. **funder 持仓去重**：若 funder 已持有该市场，直接跳过，防止重复下单。
+2. **价格区间过滤**：默认仅跟单 `0.2 ~ 0.8` 的市场（可配置）。
+3. **funder 余额/持仓查询加强**：每轮记录 funder 余额与当前持仓数量。
+4. **钱包轮换支持**：可随时 `--init-secrets` 重新录入私钥与 funder；下次启动自动用新私钥重新派生 API 凭证。
+5. **到期时间过滤默认 12h**：过滤短期高波动市场。
+6. **综合评分增强**：加入钱包 60 天胜率 + 同市场同方向多钱包共识权重。
+7. **固定 10 分钟扫描**：默认每 600 秒扫描，按耗时补偿睡眠，保证节奏稳定。
+8. **平仓逻辑强化**：平仓增加重试，提升执行成功率。
 
-- **MetaMask/EOA 钱包私钥**：只负责签名。
-- **Polymarket 代理钱包（funder）**：真实持币账户，充值余额和真实持仓都在这里。
-- 程序初始化 CLOB 客户端时使用：
-  - `signature_type=2`
-  - `funder=<代理钱包地址>`
-  - 使用私钥派生 API 凭证 `create_or_derive_api_creds()`。
+## 快速开始
 
-### 1.2 交易闭环
-
-每轮扫描逻辑：
-
-1. 拉取聪明钱包持仓（候选信号）
-2. 先做基础过滤（仓位、价格偏移、到期时间）
-3. 对过滤后的候选持仓做**综合评分**（不是信念度硬过滤）
-4. 只取评分 Top-N（默认 8）进入跟单
-5. 下单前检查：余额、最小股数、冲突仓位、重复单、滑点等
-6. 持仓监控实时价格，更新浮盈亏，按追踪止盈/止损/超时退出
-
-### 1.3 为什么这样更稳
-
-- 余额/持仓从 funder 账户取，避免 signer 地址查错。
-- 每轮从 trades 重建本地 open positions，减小状态漂移。
-- pending 订单状态跟踪 + 超时处理。
-- KEEPALIVE 与错误日志可配合守护进程稳定运行。
-
----
-
-## 2. 架构总览
-
-```text
-main.py              # 程序入口 + 主循环
-secret_store.py      # 加密输入/解密加载私钥和funder
-wallet.py            # 本地签名
-polymarket_client.py # CLOB/Gamma/Data API 封装
-strategy.py          # 候选信号综合评分 + Top-N选择
-risk_manager.py      # 风控检查
-executor.py          # 下单/平仓/持仓同步/盈亏更新
-tracker.py           # 聪明钱包追踪
-storage.py           # 本地状态缓存
-logger.py            # 日志
-notifier.py          # 飞书通知
-hourly_report.py     # 小时报表
-send-feishu.py       # 发送飞书消息
-config.yaml          # 策略参数
-```
-
----
-
-## 3. 安装
+### 1) 安装
 
 ```bash
 python3 -m venv .venv
@@ -66,105 +29,53 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
----
-
-## 4. 私钥 + funder 输入（加密存储）
-
-> 这是你要求的“一个命令行流程输入并密码保护”。
-
-初始化加密文件（首次执行一次）：
+### 2) 初始化或更新私钥/funder（交互式）
 
 ```bash
 python3 main.py --init-secrets --secrets-file secrets.enc.json
 ```
 
-程序会交互要求输入：
+会提示输入：
 
-1. MetaMask 私钥
-2. 代理钱包 funder 地址
-3. 加密密码（输入两次确认）
+- MetaMask 私钥
+- funder 代理钱包地址
+- 加密密码（两次）
 
-结果：
+> 若你更换钱包/私钥，重复执行该命令即可，程序会在下次启动时自动使用新配置并重新派生 API 信息。
 
-- 生成 `secrets.enc.json`（密文文件，权限 600）
-- 私钥不会明文落盘
-
-运行时解密：
+### 3) 启动机器人
 
 ```bash
 python3 main.py --config config.yaml --secrets-file secrets.enc.json
 ```
 
-启动后会要求输入解密密码；解密后私钥只在内存使用。
-
-### 4.1 内存安全说明（best effort）
-
-程序会尝试：
-
-- 关闭 core dump
-- `mlockall` 锁定内存页面（防交换）
-- `prctl(PR_SET_DUMPABLE=0)` 降低被非授权进程调试读取风险
-
-> 注意：Linux 用户态无法做到 100% 防所有 root 级攻击，上述为实用强化措施。
-
----
-
-## 5. 运行
-
-```bash
-python3 main.py \
-  --config config.yaml \
-  --secrets-file secrets.enc.json \
-  --rpc-url https://polygon-rpc.com
-```
-
-调试模式：
+调试（不真实下单）：
 
 ```bash
 python3 main.py --config config.yaml --secrets-file secrets.enc.json --dry-run
 ```
 
----
+## 关键配置（`config.yaml`）
 
-## 6. 策略参数（重点）
+- `strategy.scan_interval_seconds`：默认 `600`（10分钟）
+- `strategy.top_n_wallet_positions`：评分后 Top-N（默认 8）
+- `filters.min_market_price` / `filters.max_market_price`：默认 `0.2 ~ 0.8`
+- `filters.min_time_to_expiry_minutes`：默认 `720`（12小时）
+- `position.min_order_shares`：默认最少 5 股
 
-`config.yaml` 中关键项：
+## 程序架构
 
-- `strategy.top_n_wallet_positions`：综合评分后取前 N（默认 8）
-- `filters.min_position_size_usd`：最小仓位
-- `position.copy_ratio`：跟单比例
-- `position.max_single_position_usd`：单笔上限
-- `position.max_total_exposure_usd`：总暴露上限
-- `position.min_order_shares`：最小 5 股
-- `position.reserve_balance_usd`：预留余额
+- `main.py`：入口、调度、周期扫描
+- `polymarket_client.py`：Polymarket API / CLOB 访问
+- `tracker.py`：聪明钱包跟踪与胜率过滤
+- `strategy.py`：过滤 + 综合评分 + TopN
+- `risk_manager.py`：冲突/重复/滑点/持仓校验
+- `executor.py`：下单、平仓、持仓同步、挂单处理
+- `storage.py`：本地状态持久化
+- `secret_store.py`：加密保存并解密私钥/funder
+- `logger.py`：日志
 
----
+## 安全说明
 
-## 7. 日志与状态文件
-
-- `logs/live-YYYY-MM-DD.log`
-- `logs/error-YYYY-MM-DD.log`
-- `open-positions.json`
-- `tracked-markets.json`
-
----
-
-## 8. 常见问题
-
-### Q1：为什么余额和持仓可能查不到？
-请确认初始化输入的是 **funder 地址**，不是 MetaMask 地址。
-
-### Q2：为什么不下单？
-常见原因：
-
-- 预算不足（预留余额后可用资金不足）
-- 股数 < 5（被风控拦截）
-- 市场冲突/重复跟单
-- 滑点超过阈值
-
-### Q3：我只想重新录入私钥和funder
-重新执行：
-
-```bash
-python3 main.py --init-secrets --secrets-file secrets.enc.json
-```
+- 私钥不明文落盘，密文保存在 `secrets.enc.json`。
+- 解密后只在内存使用，并进行 best-effort 进程加固（禁 core dump / mlockall / prctl）。

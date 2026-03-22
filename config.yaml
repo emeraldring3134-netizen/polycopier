@@ -5,8 +5,10 @@ strategy:
 
 filters:
   min_position_size_usd: 10
+  min_market_price: 0.2
+  max_market_price: 0.8
   max_price_drift: 0.03
-  min_time_to_expiry_minutes: 30
+  min_time_to_expiry_minutes: 720
   allow_conflict: false
   skip_existing_position: true
   min_wallet_win_rate_60d: 0.55

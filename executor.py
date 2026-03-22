@@ -37,50 +37,23 @@ class Executor:
         self.notifier = notifier
 
     async def sync_positions_from_trades(self, iteration: int) -> None:
-        trades = await self.client.get_trades(self.wallet.address)
-        book: dict[tuple[str, str], dict[str, Any]] = {}
-        for t in trades:
-            token_id = str(t.get("token_id") or t.get("asset_id") or t.get("tokenId") or "")
-            market_id = str(t.get("market_id") or t.get("market") or token_id)
-            side = str(t.get("side") or "").upper()
-            shares = float(t.get("size") or t.get("shares") or 0)
-            price = float(t.get("price") or 0)
-            if not market_id or side not in {"YES", "NO"} or shares <= 0:
-                continue
-            key = (market_id, side)
-            node = book.setdefault(
-                key,
-                {
-                    "market_id": market_id,
-                    "token_id": token_id,
-                    "side": side,
-                    "shares": 0.0,
-                    "cost": 0.0,
-                    "timestamp": now_ts(),
-                    "max_pnl_percent": 0.0,
-                },
-            )
-            node["shares"] += shares
-            node["cost"] += shares * price
-        positions: list[dict[str, Any]] = []
-        for item in book.values():
-            if item["shares"] <= 0:
-                continue
-            avg_price = item["cost"] / item["shares"]
-            positions.append(
+        # 从 funder 的真实成交重建当前持仓，避免本地状态漂移。
+        positions = await self.client.get_funder_open_positions(self.wallet.address)
+        rebuilt: list[dict[str, Any]] = []
+        for item in positions:
+            rebuilt.append(
                 {
                     "market_id": item["market_id"],
-                    "token_id": item.get("token_id"),
                     "side": item["side"],
-                    "entry_price": avg_price,
-                    "amount": item["cost"],
+                    "entry_price": item["entry_price"],
+                    "amount": item["shares"] * item["entry_price"],
                     "shares": item["shares"],
-                    "timestamp": item["timestamp"],
-                    "max_pnl_percent": item["max_pnl_percent"],
+                    "timestamp": now_ts(),
+                    "max_pnl_percent": 0.0,
                 }
             )
-        self.storage.replace_positions(positions)
-        self.logger.info("positions synced from trades count=%d", len(positions), extra={"iteration": iteration})
+        self.storage.replace_positions(rebuilt)
+        self.logger.info("positions synced from funder trades count=%d", len(rebuilt), extra={"iteration": iteration})
 
     async def check_pending_orders(self, iteration: int) -> None:
         pending = self.storage.get_pending_orders()
@@ -94,7 +67,7 @@ class Executor:
         for p in pending:
             oid = str(p.get("order_id"))
             status = str(order_map.get(oid, {}).get("status", "unknown")).lower()
-            if status in {"filled", "done", "success"}:
+            if status in {"filled", "done", "success", "canceled", "cancelled"}:
                 continue
             if now_ts() - int(p.get("submit_time", now_ts())) > timeout_sec and not p.get("retried"):
                 await self.client.cancel_order(oid)
@@ -108,13 +81,15 @@ class Executor:
 
     async def execute_signal(self, s: CopySignal, iteration: int) -> dict[str, Any] | None:
         filters = self.cfg["filters"]
+        if self.risk.has_existing_position(s.market_id):
+            self.logger.info("skip existing funder position market=%s", s.market_id, extra={"iteration": iteration})
+            return None
         if not filters.get("allow_conflict", False) and self.risk.has_market_conflict(s.market_id, s.side):
             self.logger.info("risk blocked: market conflict market=%s side=%s", s.market_id, s.side, extra={"iteration": iteration})
             return None
         if self.risk.is_tracked_market(s.market_id, s.side):
             self.logger.info("risk blocked: tracked market market=%s side=%s", s.market_id, s.side, extra={"iteration": iteration})
             return None
-
         if filters.get("skip_existing_position", True) and self.risk.is_duplicate_signal(s.wallet, s.market_id, s.side):
             self.logger.info("risk blocked: duplicate signal wallet=%s market=%s", s.wallet, s.market_id, extra={"iteration": iteration})
             return None
@@ -246,21 +221,26 @@ class Executor:
 
             payload = f"close:{market_id}:{side}:{amount}:{current}:{now_ts()}"
             signature = self.wallet.sign_message(payload)
-            result = await self.client.close_position(
-                wallet_address=self.wallet.address,
-                signature=signature,
-                market_id=market_id,
-                side=side,
-                amount_usd=amount,
-                price=current,
-                proxy_wallet=self.proxy_wallet,
-                dry_run=self.dry_run,
-            )
-            status = str(result.get("status", "")).lower()
-            if status in {"simulated", "ok", "filled", "success"} or result.get("order_id"):
-                self.logger.info("exit success market=%s side=%s pnl=%.4f", market_id, side, pnl_percent, extra={"iteration": iteration})
-            else:
+            closed = False
+            for _ in range(self.cfg["risk"].get("max_order_retries", 3)):
+                result = await self.client.close_position(
+                    wallet_address=self.wallet.address,
+                    signature=signature,
+                    market_id=market_id,
+                    side=side,
+                    amount_usd=amount,
+                    price=current,
+                    proxy_wallet=self.proxy_wallet,
+                    dry_run=self.dry_run,
+                )
+                status = str(result.get("status", "")).lower()
+                if status in {"simulated", "ok", "filled", "success"} or result.get("order_id"):
+                    self.logger.info("exit success market=%s side=%s pnl=%.4f", market_id, side, pnl_percent, extra={"iteration": iteration})
+                    closed = True
+                    break
+                await asyncio.sleep(1)
+            if not closed:
                 changed_positions.append(p)
-                self.logger.error("exit failed market=%s side=%s result=%s", market_id, side, result, extra={"iteration": iteration})
+                self.logger.error("exit failed market=%s side=%s", market_id, side, extra={"iteration": iteration})
 
         self.storage.replace_positions(changed_positions)
